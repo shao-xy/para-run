@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+
+VERSION = 1.0
+DEFAULT_SUBPADS_HEIGHT = 32767
+DEFAULT_SUBPADS_SHOWN_HEIGHT = 4
+
+import sys
+import os
+from datetime import datetime
+import argparse
+import logging
+import threading
+import subprocess
+import curses
+
+class Logger:
+	def __init__(self):
+		logging.basicConfig(level = logging.INFO, format = '%(asctime)s \033[1;32m[%(tag)s]\033[0m %(message)s')
+		self._logger = logging.getLogger('MAIN')
+		self._logger.setLevel(logging.INFO)
+
+	def log(self, tag, message):
+		if message.endswith('\n'):	message = message[:-1]
+		for line in message.split('\n'):
+			self._logger.info(line, extra={'tag': tag})
+
+class FileLogger:
+	def __init__(self):
+		if not os.path.isdir('.para-run/'):
+			os.mkdir('.para-run/', mode=0o755)
+		self._fl = open('.para-run/run.log', 'a')
+		self._fl.write('\n')
+		self._fl.flush()
+	
+	def log(self, tag, message):
+		for line in message.split('\n'):
+			self._fl.write('%s [%s] %s\n' % (str(datetime.now()), tag, line))
+			self._fl.flush()
+	
+	def __del__(self):
+		self._fl.close()
+
+class WindowHandler:
+	class SubPad:
+		def __init__(self, wh, index):
+			self.wh = wh
+			self.index = index
+			self.shown_height = wh.subpads_shown_height
+			self.visible_pos = 0
+			# Allow a separation line between tasks
+			self.shown_pos_offset = index * (wh.subpads_shown_height + 1) + 2
+			self.pad = curses.newpad(DEFAULT_SUBPADS_HEIGHT, wh.width)
+			self.pad.scrollok(True)
+			self._swap_buffer(wh.output_buffer[index])
+
+		def _swap_buffer(self, buffered_lines):
+			watching_at_end = False
+			orig_y, _ = self.pad.getyx()
+			if orig_y < self.visible_pos + self.shown_height:
+				watching_at_end = True
+
+			self.pad.addstr(buffered_lines)
+			y, x = self.pad.getyx()
+			if watching_at_end and y > orig_y:
+				self.visible_pos = max(y - self.shown_height + 1, 0)
+			
+			#self.wh.gfl.log('SubPad(%d)' % self.index, f'SubPad._swap_buffer orig_y={orig_y} y={y} x={x} v={self.visible_pos} buffered_lines=' + str(buffered_lines))
+
+			self.refresh()
+
+		def refresh(self):
+			# +2 is magic number, haha
+			# This is because we reserve a line at the bottom
+			self.wh.gfl.log('SubPad(%d)' % self.index, 'refresh ' + repr(self))
+			self.pad.refresh(self.visible_pos, 0,
+					self.shown_pos_offset, 0,
+					self.shown_pos_offset + self.shown_height, self.wh.width)
+
+		def __repr__(self):
+			y, x = self.pad.getyx()
+			return f'WindowHandler.SubPad(h={self.shown_height},v={self.visible_pos},o={self.shown_pos_offset},y={y},x={x})'
+
+	def __init__(self, tasks_total, gfl):
+		self.gfl = gfl
+		self.tasks_total = tasks_total
+		self.output_buffer = [b''] * tasks_total
+		self.mutex = threading.Lock()
+		self.subpads_shown_height = DEFAULT_SUBPADS_SHOWN_HEIGHT
+		self.user_control_offset = 0
+		self.inited = False
+
+	def append_line(self, task_id, line):
+		self.mutex.acquire()
+		if self.inited:
+			if self.output_buffer[task_id - 1]:
+				self.subpads[task_id - 1]._swap_buffer(self.output_buffer[task_id - 1])
+			self.subpads[task_id - 1]._swap_buffer(line)
+		else:
+			self.output_buffer[task_id - 1] += line
+		self.mutex.release()
+
+	# Must be called after curses.initscr()
+	def init_pads(self, stdscr):
+		self.height, self.width = stdscr.getmaxyx()
+		self.stdscr = stdscr
+
+		self.mutex.acquire()
+		self.subpads = [WindowHandler.SubPad(self, i) for i in range(self.tasks_total)]
+		self.inited = True
+		self.mutex.release()
+
+	@staticmethod
+	def main(stdscr, *args, **kwargs):
+		assert(len(args) == 1 and len(kwargs) == 0)
+		handler = args[0]
+
+		curses.initscr()
+		curses.noecho()
+		curses.cbreak()
+		stdscr.keypad(True)
+
+		stdscr.addstr('PARA-RUN version %s\n' % VERSION)
+
+		try:
+			handler.init_pads(stdscr)
+
+			running = True
+			while running:
+				ch = stdscr.getch()
+
+				# if ch == curses.KEY_DOWN and 
+		except KeyboardInterrupt:
+			pass
+
+		# Clean up curses
+		curses.nocbreak()
+		stdscr.keypad(False)
+		curses.echo()
+		curses.endwin()
+
+def parse_args():
+	parser = argparse.ArgumentParser()
+	parser.add_argument('cmd', nargs='*', help='Local commands. Wrap long commands with quotes(\"\").')
+	parser.add_argument('-r', '--remote-cmds', nargs=2, metavar=('REMOTE_HOSTS', 'CMD'), action='append', help='Target hosts (1-19) are allowed "," and "-", e.g. "1,3-5" is valid. Multiple -r is allowed.')
+	args = parser.parse_args()
+	if not args.remote_cmds and len(args.cmd) == 0:
+		parser.print_help()
+		sys.exit(0)
+	return args
+
+def trans_cmds(args, logger):
+	cmds = list(args.cmd)
+	# Remote commands specified?
+	if args.remote_cmds:
+		illegal_hosts = []
+		def trans_remote_cmds(remote_cmd):
+			hosts = []
+			hosts_str, cmd = remote_cmd
+			for host_str in hosts_str.split(','):
+				hyphen_pos = host_str.find('-')
+				if hyphen_pos == -1:
+					try:
+						hostid = int(host_str)
+						hosts.append(hostid)
+					except ValueError:
+						illegal_hosts.append(host_str)
+						continue
+				else:
+					hstart = host_str[:hyphen_pos]
+					hend = host_str[hyphen_pos + 1:]
+					try:
+						hstartid = int(hstart)
+						hendid = int(hend)
+					except ValueError:
+						illegal_hosts.append(host_str)
+						continue
+					hosts += range(hstartid, hendid + 1)
+
+			hosts = list(set(hosts)) # Unique
+			#logger.info('\033[1;33mIgnoring hosts: %s\033[0m' % ','.join(illegal_hosts), extra = {'tag': 'MAIN'})
+			for hostid in hosts:
+				cmds.append('ssh n%d \"%s\"' % (hostid, cmd))
+
+		for remote_cmd in args.remote_cmds:
+			trans_remote_cmds(remote_cmd)
+		
+		if len(illegal_hosts) > 0:
+			#logger.log('MAIN', '\033[1;33mIllegal hosts: %s\033[0m' % ','.join(illegal_hosts))
+			sys.stderr.write('Illegal hosts: %s\033[0m\n' % ','.join(illegal_hosts))
+			sys.exit(-1)
+
+	return cmds
+
+def run_single_cmd(cmd, window_handler, thrd_index):
+	if not cmd:	return
+	subp = subprocess.Popen(cmd, shell = True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+	for line in iter(subp.stdout.readline, b""):
+		window_handler.append_line(thrd_index, line)
+
+def main():
+	logger = Logger()
+	gfl = FileLogger()
+	args = parse_args()
+	cmds = trans_cmds(args, logger)
+
+	gfl.log('MAIN', 'para-run (v%s) launch!' % VERSION)
+
+	tasks_acc = 1
+	tasks_total = len(cmds)
+	window_handler = WindowHandler(tasks_total, gfl)
+	thrd_pool = []
+	for cmd in cmds:
+		t = threading.Thread(target = run_single_cmd, args = (cmd, window_handler, tasks_acc))
+		t.start()
+		thrd_pool.append(t)
+		tasks_acc += 1
+
+	curses.wrapper(WindowHandler.main, window_handler)
+
+	for t in thrd_pool:
+		t.join()
+
+	gfl.log('MAIN', 'para-run shutdown successfully.')
+
+	return 0
+
+if __name__ == '__main__':
+	sys.exit(main())

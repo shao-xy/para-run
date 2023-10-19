@@ -3,6 +3,7 @@
 VERSION = 1.0
 DEFAULT_SUBPADS_HEIGHT = 32767
 DEFAULT_SUBPADS_SHOWN_HEIGHT = 4
+HEADER_LINES = 2
 
 import sys
 import os
@@ -12,6 +13,7 @@ import logging
 import threading
 import subprocess
 import curses
+import traceback
 
 class Logger:
 	def __init__(self):
@@ -25,20 +27,30 @@ class Logger:
 			self._logger.info(line, extra={'tag': tag})
 
 class FileLogger:
-	def __init__(self):
+	def __init__(self, lvl = 0):
 		if not os.path.isdir('.para-run/'):
 			os.mkdir('.para-run/', mode=0o755)
 		self._fl = open('.para-run/run.log', 'a')
 		self._fl.write('\n')
 		self._fl.flush()
+		self.mutex = threading.Lock()
+		self.lvl = lvl
 	
-	def log(self, tag, message):
+	def log(self, tag, message, lvl = 0):
+		self.mutex.acquire()
+		if not self._fl or lvl > self.lvl:
+			self.mutex.release()
+			return
 		for line in message.split('\n'):
 			self._fl.write('%s [%s] %s\n' % (str(datetime.now()), tag, line))
 			self._fl.flush()
+		self.mutex.release()
 	
 	def __del__(self):
+		self.mutex.acquire()
 		self._fl.close()
+		self._fl = None
+		self.mutex.release()
 
 class WindowHandler:
 	class SubPad:
@@ -46,6 +58,7 @@ class WindowHandler:
 			self.wh = wh
 			self.index = index
 			self.shown_height = wh.subpads_shown_height
+			self.watching_at_end = True
 			self.visible_pos = 0
 			# Allow a separation line between tasks
 			self.shown_pos_offset = index * (wh.subpads_shown_height + 1) + 2
@@ -54,27 +67,42 @@ class WindowHandler:
 			self._swap_buffer(wh.output_buffer[index])
 
 		def _swap_buffer(self, buffered_lines):
-			watching_at_end = False
-			orig_y, _ = self.pad.getyx()
-			if orig_y < self.visible_pos + self.shown_height:
-				watching_at_end = True
-
 			self.pad.addstr(buffered_lines)
+			self._refresh(self.watching_at_end)
+
+		def _refresh(self, force_watching_at_end=False):
+			if force_watching_at_end:
+				self.watching_at_end = True
+
+			# pad area: pad_render_offset_start ~ pad_render_offset_end
+			# window area: 2 ~ self.wh.height
+			pad_render_offset_start = self.shown_pos_offset + self.wh.user_control_offset
+			pad_render_offset_end = pad_render_offset_start + self.shown_height
+			render_offset_start = max(pad_render_offset_start, HEADER_LINES)
+			render_offset_end = min(pad_render_offset_end, self.wh.height - 1)
+			if render_offset_start >= self.wh.height \
+			or render_offset_end < HEADER_LINES:
+				return
+
+			self.wh.gfl.log('SubPad(%d)' % self.index,
+					repr(self) + f' render region w={self.wh.width},h={self.wh.height},rs={render_offset_start},te={render_offset_end}', 3)
+
+			render_height = render_offset_end - render_offset_start
+
 			y, x = self.pad.getyx()
-			if watching_at_end and y > orig_y:
-				self.visible_pos = max(y - self.shown_height + 1, 0)
-			
-			#self.wh.gfl.log('SubPad(%d)' % self.index, f'SubPad._swap_buffer orig_y={orig_y} y={y} x={x} v={self.visible_pos} buffered_lines=' + str(buffered_lines))
+			if self.watching_at_end:
+				self.visible_pos = max(max(y, self.shown_height) - render_height, 0)
+				#self.visible_pos = max(y - render_height + 1, 0)
 
-			self.refresh()
-
-		def refresh(self):
 			# +2 is magic number, haha
 			# This is because we reserve a line at the bottom
-			self.wh.gfl.log('SubPad(%d)' % self.index, 'refresh ' + repr(self))
 			self.pad.refresh(self.visible_pos, 0,
-					self.shown_pos_offset, 0,
-					self.shown_pos_offset + self.shown_height, self.wh.width)
+					render_offset_start, 0,
+					render_offset_end, self.wh.width)
+			self.wh.gfl.log('SubPad(%d)' % self.index, 'refresh ' + repr(self) + ' finish.', 5)
+
+		def refresh(self, force_watching_at_end=False):
+			self._refresh(force_watching_at_end)
 
 		def __repr__(self):
 			y, x = self.pad.getyx()
@@ -109,6 +137,16 @@ class WindowHandler:
 		self.inited = True
 		self.mutex.release()
 
+	def refresh_header(self):
+		self.stdscr.addstr('PARA-RUN version %s\n' % VERSION)
+
+	def refresh_all(self):
+		self.stdscr.clear()
+		self.stdscr.refresh()
+		self.refresh_header()
+		for subpad in self.subpads:
+			subpad.refresh()
+
 	@staticmethod
 	def main(stdscr, *args, **kwargs):
 		assert(len(args) == 1 and len(kwargs) == 0)
@@ -119,16 +157,30 @@ class WindowHandler:
 		curses.cbreak()
 		stdscr.keypad(True)
 
-		stdscr.addstr('PARA-RUN version %s\n' % VERSION)
-
 		try:
 			handler.init_pads(stdscr)
+			handler.refresh_header()
 
 			running = True
 			while running:
 				ch = stdscr.getch()
 
-				# if ch == curses.KEY_DOWN and 
+				render_height_logical_total = HEADER_LINES + \
+					sum([(subpad.shown_height+1) for subpad in handler.subpads])
+
+				inferior = (render_height_logical_total > handler.height) \
+						and (1 - render_height_logical_total) or 0
+				if ch == curses.KEY_DOWN and handler.user_control_offset > inferior:
+					handler.user_control_offset -= 1
+					handler.gfl.log('CURSES', f'Key DOWN pressed. rhlt={render_height_logical_total} uco={handler.user_control_offset}', 2)
+					handler.refresh_all()
+				elif ch == curses.KEY_UP and handler.user_control_offset < 0:
+					handler.user_control_offset += 1
+					handler.gfl.log('CURSES', f'Key UP pressed. rhlt={render_height_logical_total} uco={handler.user_control_offset}', 2)
+					handler.refresh_all()
+				elif ch == curses.KEY_RESIZE:
+					handler.gfl.log('CURSES', f'Window resize. rhlt={render_height_logical_total} uco={handler.user_control_offset}', 2)
+					handler.refresh_all()
 		except KeyboardInterrupt:
 			pass
 
@@ -142,6 +194,7 @@ def parse_args():
 	parser = argparse.ArgumentParser()
 	parser.add_argument('cmd', nargs='*', help='Local commands. Wrap long commands with quotes(\"\").')
 	parser.add_argument('-r', '--remote-cmds', nargs=2, metavar=('REMOTE_HOSTS', 'CMD'), action='append', help='Target hosts (1-19) are allowed "," and "-", e.g. "1,3-5" is valid. Multiple -r is allowed.')
+	parser.add_argument('-d', '--debug-level', type=int, help='Debug level, 0 by default.', default=0)
 	args = parser.parse_args()
 	if not args.remote_cmds and len(args.cmd) == 0:
 		parser.print_help()
@@ -200,9 +253,9 @@ def run_single_cmd(cmd, window_handler, thrd_index):
 
 def main():
 	logger = Logger()
-	gfl = FileLogger()
 	args = parse_args()
 	cmds = trans_cmds(args, logger)
+	gfl = FileLogger(args.debug_level)
 
 	gfl.log('MAIN', 'para-run (v%s) launch!' % VERSION)
 
@@ -216,7 +269,10 @@ def main():
 		thrd_pool.append(t)
 		tasks_acc += 1
 
-	curses.wrapper(WindowHandler.main, window_handler)
+	try:
+		curses.wrapper(WindowHandler.main, window_handler)
+	except Exception as e:
+		gfl.log('MAIN', ''.join(traceback.format_exception(None, e, e.__traceback__)))
 
 	for t in thrd_pool:
 		t.join()

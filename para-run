@@ -42,7 +42,7 @@ class FileLogger:
 			self.mutex.release()
 			return
 		for line in message.split('\n'):
-			self._fl.write('%s [%s] %s\n' % (str(datetime.now()), tag, line))
+			self._fl.write('%s %d [%s] %s\n' % (str(datetime.now()), lvl, tag, line))
 			self._fl.flush()
 		self.mutex.release()
 	
@@ -61,7 +61,7 @@ class WindowHandler:
 			self.watching_at_end = True
 			self.visible_pos = 0
 			# Allow a separation line between tasks
-			self.shown_pos_offset = index * (wh.subpads_shown_height + 1) + 2
+			self.shown_pos_offset = index * (wh.subpads_shown_height + 1) + HEADER_LINES
 			self.pad = curses.newpad(DEFAULT_SUBPADS_HEIGHT, wh.width)
 			self.pad.scrollok(True)
 			self._swap_buffer(wh.output_buffer[index])
@@ -69,25 +69,24 @@ class WindowHandler:
 		def _swap_buffer(self, buffered_lines):
 			self.pad.addstr(buffered_lines)
 			self._refresh(self.watching_at_end)
+			self.wh.stdscr.refresh()
 
 		def _refresh(self, force_watching_at_end=False):
+			assert(self.wh.mutex.locked())
 			if force_watching_at_end:
 				self.watching_at_end = True
 
 			# pad area: pad_render_offset_start ~ pad_render_offset_end
 			# window area: 2 ~ self.wh.height
-			pad_render_offset_start = self.shown_pos_offset + self.wh.user_control_offset
-			pad_render_offset_end = pad_render_offset_start + self.shown_height
+			pad_render_offset_start = self.shown_pos_offset + self.wh.user_control_offset + 1
+			pad_render_offset_end = pad_render_offset_start + self.shown_height - 1
 			render_offset_start = max(pad_render_offset_start, HEADER_LINES)
 			render_offset_end = min(pad_render_offset_end, self.wh.height - 1)
 			if render_offset_start >= self.wh.height \
 			or render_offset_end < HEADER_LINES:
 				return
 
-			self.wh.gfl.log('SubPad(%d)' % self.index,
-					repr(self) + f' render region w={self.wh.width},h={self.wh.height},rs={render_offset_start},te={render_offset_end}', 3)
-
-			render_height = render_offset_end - render_offset_start
+			render_height = render_offset_end - render_offset_start + 1
 
 			y, x = self.pad.getyx()
 			if self.watching_at_end:
@@ -99,6 +98,32 @@ class WindowHandler:
 			self.pad.refresh(self.visible_pos, 0,
 					render_offset_start, 0,
 					render_offset_end, self.wh.width)
+
+			self.wh.gfl.log('SubPad(%d)' % self.index,
+					'refresh ' + repr(self) + f' region w={self.wh.width},h={self.wh.height},rs={render_offset_start},re={render_offset_end}', 3)
+			#traceback.print_stack(file=self.wh.gfl._fl)
+
+			# pad subtitle
+			pad_title_pos = self.shown_pos_offset + self.wh.user_control_offset
+			if HEADER_LINES <= pad_title_pos < self.wh.height:
+				if self.wh.color_available:
+					#title = '[PROC %d] %s' % (self.index+1, self.wh.cmds[self.index])
+					title = '[PROC %d] (%s) %s' % (self.index+1,
+							(self.wh.tasks_running_status[self.index] \
+								and 'RUNNING' or 'STOPPED'),
+							self.wh.cmds[self.index])
+						
+					self.wh.gfl.log('SubPad(%d)' % self.index, 'refresh pad_title_pos ' + str(pad_title_pos) + title, 5)
+					self.wh.stdscr.addstr(pad_title_pos, 0, title,
+							curses.color_pair(self.wh.tasks_running_status[self.index] and 2 or 3))
+				else:
+					title = '[PROC %d] (%s) %s' % (self.index+1,
+							(self.wh.tasks_running_status[self.index] \
+								and 'RUNNING' or 'STOPPED'),
+							self.wh.cmds[self.index])
+					self.wh.gfl.log('SubPad(%d)' % self.index, 'refresh pad_title_pos ' + str(pad_title_pos) + title, 5)
+					self.wh.stdscr.addstr(pad_title_pos, 0, title)
+
 			self.wh.gfl.log('SubPad(%d)' % self.index, 'refresh ' + repr(self) + ' finish.', 5)
 
 		def refresh(self, force_watching_at_end=False):
@@ -108,10 +133,12 @@ class WindowHandler:
 			y, x = self.pad.getyx()
 			return f'WindowHandler.SubPad(h={self.shown_height},v={self.visible_pos},o={self.shown_pos_offset},y={y},x={x})'
 
-	def __init__(self, tasks_total, gfl):
+	def __init__(self, cmds, gfl):
 		self.gfl = gfl
-		self.tasks_total = tasks_total
-		self.output_buffer = [b''] * tasks_total
+		self.cmds = cmds
+		self.tasks_total = len(cmds)
+		self.tasks_running_status = [True] * self.tasks_total
+		self.output_buffer = [b''] * self.tasks_total
 		self.mutex = threading.Lock()
 		self.subpads_shown_height = DEFAULT_SUBPADS_SHOWN_HEIGHT
 		self.user_control_offset = 0
@@ -119,33 +146,81 @@ class WindowHandler:
 
 	def append_line(self, task_id, line):
 		self.mutex.acquire()
+		self.gfl.log('WindowHandler', 'append_line %d %s' % (task_id, str(line)), 2)
 		if self.inited:
 			if self.output_buffer[task_id - 1]:
+				self.output_buffer[task_id - 1] += line
 				self.subpads[task_id - 1]._swap_buffer(self.output_buffer[task_id - 1])
-			self.subpads[task_id - 1]._swap_buffer(line)
+			else:
+				self.subpads[task_id - 1]._swap_buffer(line)
 		else:
 			self.output_buffer[task_id - 1] += line
 		self.mutex.release()
 
+	def mark_finished(self, task_id):
+		self.mutex.acquire()
+		self.tasks_running_status[task_id - 1] = False
+		self.gfl.log('WindowHandler', 'mark_finished %d' % task_id, 3)
+		self._refresh_header()
+		self.subpads[task_id - 1].refresh()
+		self.stdscr.refresh()
+		self.mutex.release()
+
+	def init_size(self):
+		self.height, self.width = self.stdscr.getmaxyx()
+
 	# Must be called after curses.initscr()
-	def init_pads(self, stdscr):
-		self.height, self.width = stdscr.getmaxyx()
+	def init_all(self, stdscr):
 		self.stdscr = stdscr
+		self.init_size()
+		self.color_available = curses.has_colors()
+		if self.color_available:
+			curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLUE)
+			curses.init_pair(2, curses.COLOR_WHITE, curses.COLOR_GREEN)
+			curses.init_pair(3, curses.COLOR_WHITE, curses.COLOR_RED)
 
 		self.mutex.acquire()
+		self._refresh_header()
 		self.subpads = [WindowHandler.SubPad(self, i) for i in range(self.tasks_total)]
 		self.inited = True
 		self.mutex.release()
 
-	def refresh_header(self):
-		self.stdscr.addstr('PARA-RUN version %s\n' % VERSION)
+	def _refresh_header(self):
+		if self.color_available:
+			self.stdscr.addstr(0, 0, 'PARA-RUN version %s' % VERSION, curses.color_pair(1))
+		else:
+			self.stdscr.addstr(0, 0, 'PARA-RUN version %s' % VERSION)
+		"""
+		for i in range(len(self.subpads)):
+			subpad = self.subpads[i]
+			show_pos = subpad.shown_pos_offset + self.user_control_offset - 1
+			if show_pos < HEADER_LINES:
+				continue
+			if show_pos >= self.height:
+				break
+			if self.color_available:
+				if self.tasks_running_status[i]:
+					self.stdscr.addstr(show_pos, 0, '[PROC %d] (RUNNING)' % (i+1), curses.color_pair(2))
+				else:
+					self.stdscr.addstr(show_pos, 0, '[PROC %d] (STOPPED)' % (i+1), curses.color_pair(3))
+			else:
+				if self.tasks_running_status[i]:
+					self.stdscr.addstr(show_pos, 0, '[PROC %d] (RUNNING)' % (i+1))
+				else:
+					self.stdscr.addstr(show_pos, 0, '[PROC %d] (STOPPED)' % (i+1))
+		"""
 
 	def refresh_all(self):
+		self.mutex.acquire()
+		if not self.inited:
+			self.mutex.release()
+			return
 		self.stdscr.clear()
-		self.stdscr.refresh()
-		self.refresh_header()
+		self._refresh_header()
 		for subpad in self.subpads:
 			subpad.refresh()
+		self.stdscr.refresh()
+		self.mutex.release()
 
 	@staticmethod
 	def main(stdscr, *args, **kwargs):
@@ -158,8 +233,7 @@ class WindowHandler:
 		stdscr.keypad(True)
 
 		try:
-			handler.init_pads(stdscr)
-			handler.refresh_header()
+			handler.init_all(stdscr)
 
 			running = True
 			while running:
@@ -180,7 +254,11 @@ class WindowHandler:
 					handler.refresh_all()
 				elif ch == curses.KEY_RESIZE:
 					handler.gfl.log('CURSES', f'Window resize. rhlt={render_height_logical_total} uco={handler.user_control_offset}', 2)
+					handler.init_size()
 					handler.refresh_all()
+				elif ch == ord('q'):
+					if not True in handler.tasks_running_status:
+						running = False
 		except KeyboardInterrupt:
 			pass
 
@@ -251,17 +329,12 @@ def run_single_cmd(cmd, window_handler, thrd_index):
 	for line in iter(subp.stdout.readline, b""):
 		window_handler.append_line(thrd_index, line)
 
-def main():
-	logger = Logger()
-	args = parse_args()
-	cmds = trans_cmds(args, logger)
-	gfl = FileLogger(args.debug_level)
+	window_handler.mark_finished(thrd_index)
 
-	gfl.log('MAIN', 'para-run (v%s) launch!' % VERSION)
-
+def para_run(cmds, gfl):
 	tasks_acc = 1
 	tasks_total = len(cmds)
-	window_handler = WindowHandler(tasks_total, gfl)
+	window_handler = WindowHandler(cmds, gfl)
 	thrd_pool = []
 	for cmd in cmds:
 		t = threading.Thread(target = run_single_cmd, args = (cmd, window_handler, tasks_acc))
@@ -276,6 +349,16 @@ def main():
 
 	for t in thrd_pool:
 		t.join()
+
+def main():
+	logger = Logger()
+	args = parse_args()
+	cmds = trans_cmds(args, logger)
+	gfl = FileLogger(args.debug_level)
+
+	gfl.log('MAIN', 'para-run (v%s) launch!' % VERSION)
+
+	para_run(cmds, gfl)
 
 	gfl.log('MAIN', 'para-run shutdown successfully.')
 

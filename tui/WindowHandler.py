@@ -35,27 +35,31 @@ class WindowHandler:
             self.flag_refresh = False
             return
 
+        self.mutex.acquire()
         if not self.has_update:
+            self.gfl.log('WindowHandler', 'maybe_render_all_buffers noupdate', 10)
+            self.mutex.release()
             return
 
-        self.mutex.acquire()
         self.gfl.log('WindowHandler', 'maybe_render_all_buffers', 10)
         for i in range(self.tasks_total):
             if self.output_buffer[i]:
                 self.subpads[i]._swap_buffer(self.output_buffer[i])
                 self.output_buffer[i] = b''
+        self.has_update = False
         self.mutex.release()
 
         self.stdscr.refresh()
 
     def mark_finished(self, task_id):
-        if not self.inited:    return
+        #if not self.inited:    return
         self.mutex.acquire()
         self.tasks_running_status[task_id - 1] = False
+        self.flag_refresh = True
         self.gfl.log('WindowHandler', 'mark_finished %d' % task_id, 3)
-        self._refresh_header()
-        self.subpads[task_id - 1].refresh()
-        self.stdscr.refresh()
+        #self._refresh_header()
+        #self.subpads[task_id - 1].refresh()
+        #self.stdscr.refresh()
         self.mutex.release()
 
     def init_size(self):
@@ -78,29 +82,17 @@ class WindowHandler:
         self.mutex.release()
 
     def _refresh_header(self):
+        finished = sum([ 1 for stat in self.tasks_running_status if not stat ])
+        total = len(self.tasks_running_status)
+        header = 'PARA-RUN V%s   Finished: %d / %d' % (VERSION, finished, total)
+
         if self.color_available:
-            self.stdscr.addstr(0, 0, 'PARA-RUN version %s' % VERSION, curses.color_pair(1))
+            header += ' ' * (self.width - len(header))
+            highlighted_len = self.width * finished // total
+            self.stdscr.addstr(0, 0, header[:highlighted_len], curses.color_pair(1))
+            self.stdscr.addstr(header[highlighted_len:])
         else:
-            self.stdscr.addstr(0, 0, 'PARA-RUN version %s' % VERSION)
-        """
-        for i in range(len(self.subpads)):
-            subpad = self.subpads[i]
-            show_pos = subpad.shown_pos_offset + self.user_control_offset - 1
-            if show_pos < HEADER_LINES:
-                continue
-            if show_pos >= self.height:
-                break
-            if self.color_available:
-                if self.tasks_running_status[i]:
-                    self.stdscr.addstr(show_pos, 0, '[PROC %d] (RUNNING)' % (i+1), curses.color_pair(2))
-                else:
-                    self.stdscr.addstr(show_pos, 0, '[PROC %d] (STOPPED)' % (i+1), curses.color_pair(3))
-            else:
-                if self.tasks_running_status[i]:
-                    self.stdscr.addstr(show_pos, 0, '[PROC %d] (RUNNING)' % (i+1))
-                else:
-                    self.stdscr.addstr(show_pos, 0, '[PROC %d] (STOPPED)' % (i+1))
-        """
+            self.stdscr.addstr(0, 0, header)
 
     def refresh_all(self):
         self.mutex.acquire()

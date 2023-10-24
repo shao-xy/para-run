@@ -14,7 +14,7 @@ class SubPad:
         self.watching_at_end = True
         self.visible_pos = 0
         # Allow a separation line between tasks
-        self.shown_pos_offset = index * (wh.subpads_shown_height + 1) + HEADER_LINES
+        self.shown_pos_offset = index * (wh.subpads_shown_height + 2) + HEADER_LINES
         self.pad = curses.newpad(DEFAULT_SUBPADS_HEIGHT, wh.width)
         self.pad.scrollok(True)
         #self._swap_buffer(wh.output_buffer[index])
@@ -31,13 +31,14 @@ class SubPad:
 
         # pad subtitle
         pad_title_pos = self.shown_pos_offset + self.wh.user_control_offset
-        if HEADER_LINES <= pad_title_pos < self.wh.height:
+        if HEADER_LINES <= pad_title_pos < self.wh.height - 1:
             if self.wh.color_available:
                 #title = '[PROC %d] %s' % (self.index+1, self.wh.cmds[self.index])
                 title = '[PROC %d] (%s) %s' % (self.index+1,
                         (self.wh.tasks_running_status[self.index] \
                             and 'RUNNING' or 'STOPPED'),
                         self.wh.cmds[self.index])
+                title += ' ' * (self.wh.width - len(title))
                     
                 self.wh.gfl.log('SubPad(%d)' % self.index, 'refresh pad_title_pos ' + str(pad_title_pos) + ' '  + title, 5)
                 self.wh.stdscr.addstr(pad_title_pos, 0, title,

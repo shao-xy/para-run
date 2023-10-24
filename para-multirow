@@ -1,0 +1,146 @@
+#!/usr/bin/env python2
+
+import sys
+import logging
+import argparse
+import threading
+import subprocess
+import re
+
+def init_logging():
+	logging.basicConfig(level = logging.INFO, format = '%(asctime)s \033[1;32m[%(tag)s]\033[0m %(message)s')
+	logger = logging.getLogger('MAIN')
+	logger.setLevel(logging.INFO)
+	return logger
+
+def parse_args():
+	parser = argparse.ArgumentParser()
+	parser.add_argument('cmd', nargs='+', help='Single command. Wrap long commands with quotes(\"\").')
+	parser.add_argument('-t', '--hosts', help='Target hosts (1-19) splitted with comma(\",\")')
+	return parser.parse_args()
+
+def log(logger, mutex, dashboard, update_idx = -1):
+	mutex.acquire()
+	if update_idx < 0:
+		# Navigate to top
+		sys.stdout.write('\r\033[0K' + '\033[1A\033[0K' * len(dashboard))
+		for i in range(len(dashboard)):
+			line = dashboard[i]
+			sys.stdout.write('\033[1;32m[THREAD %d]\033[0m %s\n' % (i+1, line))
+			#logger.info(line, extra={'tag': 'THREAD %d' % (i+1)})
+	else:
+		sys.stdout.write('\r' + '\033[1A' * (len(dashboard) - update_idx) + '\033[0K')
+		sys.stdout.write('\033[1;32m[THREAD %2d]\033[0m %s' % (update_idx + 1, dashboard[update_idx]))
+		sys.stdout.write('\n' * (len(dashboard) - update_idx))
+
+	mutex.release()
+	#sys.exit(0)
+
+def log_single(logger, tag, message, is_err=False):
+	logging_message_format = is_err and '\033[1;35m%s\033[0m' or '%s'
+	if message.endswith('\n'):	message = message[:-1]
+	lines = message.split('\n')
+	for line in lines:
+		logger.info(logging_message_format % line, extra={'tag': tag})
+
+def trans_cmds(args, logger):
+	# Hosts specified?
+	if args.hosts:
+		cmds = []
+		hosts = []
+		illegal_hosts = []
+
+		hosts_str = args.hosts.split(',')
+		for host_str in hosts_str:
+			hyphen_pos = host_str.find('-')
+			if hyphen_pos == -1:
+				try:
+					hostid = int(host_str)
+					hosts.append(hostid)
+				except ValueError:
+					illegal_hosts.append(host_str)
+					continue
+			else:
+				hstart = host_str[:hyphen_pos]
+				hend = host_str[hyphen_pos + 1:]
+				try:
+					hstartid = int(hstart)
+					hendid = int(hend)
+				except ValueError:
+					illegal_hosts.append(host_str)
+					continue
+				hosts += range(hstartid, hendid + 1)
+
+		hosts = list(set(hosts)) # Unique
+		logger.info('\033[1;33mIgnoring hosts: %s\033[0m' % ','.join(illegal_hosts), extra = {'tag': 'MAIN'})
+		for hostid in hosts:
+			for cmd in args.cmd:
+				cmds.append('ssh n%d \"%s\"' % (hostid, cmd))
+	else:
+		cmds = args.cmd
+
+	return cmds
+
+def run_single_cmd(cmd, logger, dashboard, errors, mutex, thrd_index):
+	if not cmd:	return
+	logging_tag = 'Thread %d' % thrd_index
+	#logger.info('Starting command: %s' % cmd, extra = {'tag': logging_tag})
+	dashboard[thrd_index - 1] = 'Starting command: %s' % cmd
+	log(logger, mutex, dashboard, thrd_index - 1)
+	subp = subprocess.Popen(cmd, shell = True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+	
+	while True:
+		line = subp.stdout.readline()
+		if not line:	break
+		line = line[:-1]
+
+		if len(line) >= 60:
+			line = line[:57] + '...'
+
+		dashboard[thrd_index - 1] = line
+		log(logger, mutex, dashboard, thrd_index - 1)
+
+	err = subp.stderr.read()
+	if err:
+		#log_single(logger, logging_tag, err, is_err=True)
+		errors[thrd_index - 1] = err
+
+	dashboard[thrd_index - 1] = '\033[1;35m(EXITED)\033[0m ' + dashboard[thrd_index - 1]
+	log(logger, mutex, dashboard, thrd_index - 1)
+
+def main():
+	logger = init_logging()
+	args = parse_args()
+
+	cmds = trans_cmds(args, logger)
+
+	logger.info('\033[1;33mStarting tasks ...\033[0m', extra = {'tag': 'MAIN'})
+	tasks_acc = 1
+	tasks_total = len(cmds)
+	thrd_pool = []
+	mutex = threading.Lock()
+	dashboard = [''] * tasks_total
+	errors = [''] * tasks_total
+	sys.stdout.write('\n' * tasks_total)
+	log(logger, mutex, dashboard)
+	for cmd in cmds:
+		#logger.info('\033[1;33mStarting tasks (%d/%d) ...\033[0m' % (tasks_acc, tasks_total), extra = {'tag': 'MAIN'})
+		dashboard[tasks_acc - 1] = 'Task %d start.' % tasks_acc
+
+		t = threading.Thread(target = run_single_cmd, args = (cmd, logger, dashboard, errors, mutex, tasks_acc))
+		t.start()
+		thrd_pool.append(t)
+
+		tasks_acc += 1
+
+	#logger.info('\033[1;33mWaiting for all tasks done...\033[0m', extra = {'tag': 'MAIN'})
+	for t in thrd_pool:
+		t.join()
+
+	for i in range(tasks_total):
+		if errors[i]:
+			log_single(logger, 'THREAD %i STDERR' % (i+1), errors[i], is_err=True)
+	logger.info('\033[1;33mAll tasks done.\033[0m', extra = {'tag': 'MAIN'})
+
+if __name__ == '__main__':
+	sys.exit(main())

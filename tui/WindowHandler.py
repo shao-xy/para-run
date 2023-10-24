@@ -22,48 +22,10 @@ class WindowHandler:
         self.has_update = False
         self.inited = False
 
-    def append_line(self, task_id, line):
-        self.mutex.acquire()
-        self.gfl.log('WindowHandler', 'append_line %d %s' % (task_id, str(line)), 2)
-        self.output_buffer[task_id - 1] += line
-        self.has_update = True
-        self.mutex.release()
-
-    def maybe_render_all_buffers(self):
-        if self.flag_refresh:
-            self.refresh_all()
-            self.flag_refresh = False
-            return
-
-        self.mutex.acquire()
-        if not self.has_update:
-            self.gfl.log('WindowHandler', 'maybe_render_all_buffers noupdate', 10)
-            self.mutex.release()
-            return
-
-        self.gfl.log('WindowHandler', 'maybe_render_all_buffers', 10)
-        for i in range(self.tasks_total):
-            if self.output_buffer[i]:
-                self.subpads[i]._swap_buffer(self.output_buffer[i])
-                self.output_buffer[i] = b''
-        self.has_update = False
-        self.mutex.release()
-
-        self.stdscr.refresh()
-
-    def mark_finished(self, task_id):
-        #if not self.inited:    return
-        self.mutex.acquire()
-        self.tasks_running_status[task_id - 1] = False
-        self.flag_refresh = True
-        self.gfl.log('WindowHandler', 'mark_finished %d' % task_id, 3)
-        #self._refresh_header()
-        #self.subpads[task_id - 1].refresh()
-        #self.stdscr.refresh()
-        self.mutex.release()
-
     def init_size(self):
+        self.mutex.acquire()
         self.height, self.width = self.stdscr.getmaxyx()
+        self.mutex.release()
 
     # Must be called after curses.initscr()
     def init_all(self, stdscr):
@@ -81,6 +43,30 @@ class WindowHandler:
         self.inited = True
         self.mutex.release()
 
+    def append_line(self, task_id, line):
+        self.mutex.acquire()
+        self.gfl.log('WindowHandler', 'append_line %d %s' % (task_id, str(line)), 2)
+        self.output_buffer[task_id - 1] += line
+        self.has_update = True
+        self._update_buffers()
+        self.mutex.release()
+
+    def _update_buffers(self):
+        self.gfl.log('WindowHandler', '_update_buffers', 10)
+        for i in range(self.tasks_total):
+            if self.output_buffer[i]:
+                self.subpads[i]._swap_buffer(self.output_buffer[i])
+                self.output_buffer[i] = b''
+        self.has_update = False
+
+    def mark_finished(self, task_id):
+        self.mutex.acquire()
+        self.tasks_running_status[task_id - 1] = False
+        self.gfl.log('WindowHandler', 'mark_finished %d' % task_id, 3)
+        if self.inited:
+            self._refresh_all()
+        self.mutex.release()
+
     def _refresh_header(self):
         finished = sum([ 1 for stat in self.tasks_running_status if not stat ])
         total = len(self.tasks_running_status)
@@ -94,8 +80,7 @@ class WindowHandler:
         else:
             self.stdscr.addstr(0, 0, header)
 
-    def refresh_all(self):
-        self.mutex.acquire()
+    def _refresh_all(self):
         if not self.inited:
             self.mutex.release()
             return
@@ -104,11 +89,12 @@ class WindowHandler:
         self.stdscr.refresh()
         for subpad in self.subpads:
             subpad.refresh()
-        self.mutex.release()
         self.stdscr.refresh()
 
-    def mark_refresh_all(self):
-        self.flag_refresh = True
+    def refresh_all(self):
+        self.mutex.acquire()
+        self._refresh_all()
+        self.mutex.release()
 
     @staticmethod
     def main(stdscr, *args, **kwargs):
@@ -123,7 +109,7 @@ class WindowHandler:
         try:
             handler.init_all(stdscr)
 
-            stdscr.nodelay(True)
+            #stdscr.nodelay(True)
 
             running = True
             while running:
@@ -131,24 +117,22 @@ class WindowHandler:
                 handler.gfl.log('CURSES', f'ch={ch}', 10)
 
                 render_height_logical_total = HEADER_LINES + \
-                    sum([(subpad.shown_height+1) for subpad in handler.subpads])
+                    sum([(subpad.shown_height+2) for subpad in handler.subpads])
 
                 inferior = (render_height_logical_total > handler.height) \
                         and (1 - render_height_logical_total) or 0
-                if ch == -1:
-                    handler.maybe_render_all_buffers()
-                elif ch == curses.KEY_DOWN and handler.user_control_offset > inferior:
+                if ch == curses.KEY_DOWN and handler.user_control_offset > inferior:
                     handler.user_control_offset -= 1
                     handler.gfl.log('CURSES', f'Key DOWN pressed. rhlt={render_height_logical_total} uco={handler.user_control_offset}', 2)
-                    handler.mark_refresh_all()
+                    handler.refresh_all()
                 elif ch == curses.KEY_UP and handler.user_control_offset < 0:
                     handler.user_control_offset += 1
                     handler.gfl.log('CURSES', f'Key UP pressed. rhlt={render_height_logical_total} uco={handler.user_control_offset}', 2)
-                    handler.mark_refresh_all()
+                    handler.refresh_all()
                 elif ch == curses.KEY_RESIZE:
                     handler.gfl.log('CURSES', f'Window resize. rhlt={render_height_logical_total} uco={handler.user_control_offset}', 2)
                     handler.init_size()
-                    handler.mark_refresh_all()
+                    handler.refresh_all()
                 elif ch == ord('q'):
                     if not True in handler.tasks_running_status:
                         running = False

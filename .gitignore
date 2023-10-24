@@ -1,2 +1,4 @@
 .para-run/
 *.sw[a-z]
+
+__pycache__/

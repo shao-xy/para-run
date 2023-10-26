@@ -22,15 +22,15 @@ class WindowHandler:
         self.has_update = False
         self.inited = False
 
-    def init_size(self):
-        self.mutex.acquire()
+    def _init_size(self):
         self.height, self.width = self.stdscr.getmaxyx()
-        self.mutex.release()
+        #self.stdscr.erase()
+        #self.stdscr.refresh()
+        self.gfl.log('WindowHandler', f'Screen size resized to {self.height} * {self.width}')
 
     # Must be called after curses.initscr()
     def init_all(self, stdscr):
         self.stdscr = stdscr
-        self.init_size()
         self.color_available = curses.has_colors()
         if self.color_available:
             curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLUE)
@@ -38,6 +38,7 @@ class WindowHandler:
             curses.init_pair(3, curses.COLOR_WHITE, curses.COLOR_RED)
 
         self.mutex.acquire()
+        self._init_size()
         self._refresh_header()
         self.subpads = [SubPad(self, i) for i in range(self.tasks_total)]
         self.inited = True
@@ -96,10 +97,26 @@ class WindowHandler:
         self._refresh_all()
         self.mutex.release()
 
+    def start_worker_threads(self, cmds, func_single_thread):
+        tasks_acc = 1
+        tasks_total = len(cmds)
+        self.thrd_pool = []
+        for cmd in cmds:
+            t = threading.Thread(target = func_single_thread, args = (cmd, self, tasks_acc))
+            t.start()
+            self.thrd_pool.append(t)
+            tasks_acc += 1
+
+    def join_worker_threads(self):
+        for t in self.thrd_pool:
+            t.join()
+
     @staticmethod
     def main(stdscr, *args, **kwargs):
-        assert(len(args) == 1 and len(kwargs) == 0)
+        assert(len(args) == 3 and len(kwargs) == 0)
         handler = args[0]
+        cmds = args[1]
+        func_single_thread = args[2]
 
         curses.initscr()
         curses.noecho()
@@ -108,13 +125,22 @@ class WindowHandler:
 
         try:
             handler.init_all(stdscr)
-
-            #stdscr.nodelay(True)
+            handler.start_worker_threads(cmds, func_single_thread)
 
             running = True
             while running:
                 ch = stdscr.getch()
-                handler.gfl.log('CURSES', f'ch={ch}', 10)
+                handler.gfl.log('CURSES', f'ch={ch}', 5)
+                if ch == curses.KEY_RESIZE:
+                    handler.gfl.log('CURSES', f'Window resize.', 2)
+                    handler._init_size()
+                    handler.mutex.acquire()
+                    handler.gfl.log('CURSES', f'Window resize start refresh.', 2)
+                    #handler._init_size()
+                    handler._refresh_all()
+                    handler.gfl.log('CURSES', f'Window resize refresh end.', 2)
+                    handler.mutex.release()
+                    continue
 
                 render_height_logical_total = HEADER_LINES + \
                     sum([(subpad.shown_height+2) for subpad in handler.subpads])
@@ -129,10 +155,6 @@ class WindowHandler:
                     handler.user_control_offset += 1
                     handler.gfl.log('CURSES', f'Key UP pressed. rhlt={render_height_logical_total} uco={handler.user_control_offset}', 2)
                     handler.refresh_all()
-                elif ch == curses.KEY_RESIZE:
-                    handler.gfl.log('CURSES', f'Window resize. rhlt={render_height_logical_total} uco={handler.user_control_offset}', 2)
-                    handler.init_size()
-                    handler.refresh_all()
                 elif ch == ord('q'):
                     if not True in handler.tasks_running_status:
                         running = False
@@ -146,11 +168,13 @@ class WindowHandler:
         curses.endwin()
 
     @staticmethod
-    def start_main(window_handler):
+    def start_main(window_handler, cmds, func_single_thread):
         ret = -1
         try:
-            ret = curses.wrapper(WindowHandler.main, window_handler)
+            ret = curses.wrapper(WindowHandler.main, window_handler, cmds, func_single_thread)
         except Exception as e:
             window_handler.gfl.log('MAIN', ''.join(traceback.format_exception(None, e, e.__traceback__)))
+
+        window_handler.join_worker_threads()
 
         return ret

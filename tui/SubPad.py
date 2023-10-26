@@ -10,6 +10,7 @@ class SubPad:
     def __init__(self, wh, index):
         self.wh = wh
         self.index = index
+        self.log_tag = 'SubPad(%d)' % self.index
         self.shown_height = wh.subpads_shown_height
         self.watching_at_end = True
         self.visible_pos = 0
@@ -38,17 +39,27 @@ class SubPad:
                         (self.wh.tasks_running_status[self.index] \
                             and 'RUNNING' or 'STOPPED'),
                         self.wh.cmds[self.index])
+                self.wh.gfl.log(self.log_tag, 'refresh pad_title_pos ' + str(pad_title_pos) + f' {self.wh.width} ' + title, 5)
                 title += ' ' * (self.wh.width - len(title))
                     
-                self.wh.gfl.log('SubPad(%d)' % self.index, 'refresh pad_title_pos ' + str(pad_title_pos) + ' '  + title, 5)
-                self.wh.stdscr.addstr(pad_title_pos, 0, title,
+                try:
+                    self.wh.stdscr.addstr(pad_title_pos, 0, title,
                         curses.color_pair(self.wh.tasks_running_status[self.index] and 2 or 3))
+                except Exception as e:
+                    self.wh.gfl.log(self.log_tag, 'ncurses.pad.refresh error. Might because we are resizing the screen size when the pad is refreshing.')
+                    self.wh.gfl.log(self.log_tag, ''.join(traceback.format_exception(None, e, e.__traceback__)))
+
+                #if not True in self.wh.tasks_running_status:
+                #    if self.index == 0:
+                #        time.sleep(2)
+                #    else:
+                #        time.sleep(1)
             else:
                 title = '[PROC %d] (%s) %s' % (self.index+1,
                         (self.wh.tasks_running_status[self.index] \
                             and 'RUNNING' or 'STOPPED'),
                         self.wh.cmds[self.index])
-                self.wh.gfl.log('SubPad(%d)' % self.index, 'refresh pad_title_pos ' + str(pad_title_pos) + title, 5)
+                self.wh.gfl.log(self.log_tag, 'refresh pad_title_pos ' + str(pad_title_pos) + title, 5)
                 self.wh.stdscr.addstr(pad_title_pos, 0, title)
 
         # pad area: pad_render_offset_start ~ pad_render_offset_end
@@ -78,21 +89,19 @@ class SubPad:
 
         # +2 is magic number, haha
         # This is because we reserve a line at the bottom
-        self.pad.refresh(self.visible_pos, 0,
-                render_offset_start, 0,
-                render_offset_end, self.wh.width)
+        try:
+            self.pad.refresh(self.visible_pos, 0,
+                            render_offset_start, 0,
+                            render_offset_end, self.wh.width - 1)
+        except Exception as e:
+            self.wh.gfl.log(self.log_tag, 'ncurses.pad.refresh error. Might because we are resizing the screen size when the pad is refreshing.')
+            self.wh.gfl.log(self.log_tag, ''.join(traceback.format_exception(None, e, e.__traceback__)))
 
-        #if not True in self.wh.tasks_running_status:
-        #    if self.index == 0:
-        #        time.sleep(2)
-        #    else:
-        #        time.sleep(1)
-
-        self.wh.gfl.log('SubPad(%d)' % self.index,
+        self.wh.gfl.log(self.log_tag,
                 'refresh ' + repr(self) + f' region w={self.wh.width},h={self.wh.height},rs={render_offset_start},re={render_offset_end}', 3)
         #traceback.print_stack(file=self.wh.gfl._fl)
 
-        self.wh.gfl.log('SubPad(%d)' % self.index, 'refresh ' + repr(self) + ' finish.', 5)
+        self.wh.gfl.log(self.log_tag, 'refresh ' + repr(self) + ' finish.', 5)
         self.wh.stdscr.refresh()
 
     def refresh(self, force_watching_at_end=False):

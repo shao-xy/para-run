@@ -1,5 +1,7 @@
 # vim: expandtab smarttab ts=4
 
+from common.configs import *
+
 import argparse
 
 def parse_args():
@@ -7,6 +9,7 @@ def parse_args():
     parser.add_argument('cmd', nargs='*', help='Local commands. Wrap long commands with quotes(\"\").')
     parser.add_argument('-r', '--remote-cmds', nargs=2, metavar=('REMOTE_HOSTS', 'CMD'), action='append', help='Target hosts (1-19) are allowed "," and "-", e.g. "1,3-5" is valid. Multiple -r is allowed.')
     parser.add_argument('-d', '--debug-level', type=int, help='Debug level, 0 by default.', default=0)
+    parser.add_argument('-w', '--subwin-height', type=int, help=f'The starting height of each subwindow, {DEFAULT_SUBPADS_SHOWN_HEIGHT} by default.', default=DEFAULT_SUBPADS_SHOWN_HEIGHT)
     args = parser.parse_args()
     if not args.remote_cmds and len(args.cmd) == 0:
         parser.print_help()

@@ -9,14 +9,15 @@ import traceback
 from tui.SubPad import SubPad
 
 class WindowHandler:
-    def __init__(self, cmds, gfl):
+    def __init__(self, cmds, gfl, args):
         self.gfl = gfl
         self.cmds = cmds
         self.tasks_total = len(cmds)
         self.tasks_running_status = [True] * self.tasks_total
+        self.tasks_retcode = [0] * self.tasks_total
         self.output_buffer = [b''] * self.tasks_total
         self.mutex = threading.Lock()
-        self.subpads_shown_height = DEFAULT_SUBPADS_SHOWN_HEIGHT
+        self.subpads_shown_height = args.subwin_height
         self.user_control_offset = 0
         self.cursor_in_subpad = 0
         self.flag_refresh = False
@@ -63,10 +64,11 @@ class WindowHandler:
         self.show_cursor(True)
         self.has_update = False
 
-    def mark_finished(self, task_id):
+    def mark_finished(self, task_id, returncode):
         self.mutex.acquire()
         self.tasks_running_status[task_id - 1] = False
-        self.gfl.log('WindowHandler', 'mark_finished %d' % task_id, 3)
+        self.tasks_retcode[task_id - 1] = returncode
+        self.gfl.log('WindowHandler', 'mark_finished %d returncode %d' % (task_id, returncode), 3)
         if self.inited:
             self._refresh_all()
         self.mutex.release()
@@ -152,6 +154,14 @@ class WindowHandler:
         self.subpads[self.cursor_in_subpad].move_cursor(direction)
         self.maybe_move_viewport()
 
+    def adjust_subpad_height(self, size):
+        self.mutex.acquire()
+        real_adjust_size = self.subpads[self.cursor_in_subpad].adjust_height(size)
+        for i in range(self.cursor_in_subpad + 1, len(self.subpads)):
+            self.subpads[i].shown_pos_offset += real_adjust_size
+        self._refresh_all()
+        self.mutex.release()
+
     def start_worker_threads(self, cmds, func_single_thread):
         tasks_acc = 1
         tasks_total = len(cmds)
@@ -226,6 +236,12 @@ class WindowHandler:
                 elif ch == ord('k'):
                     handler.move_cursor_in_pad(-1)
                     handler.gfl.log('CURSES', f'Key k pressed. cp={handler.cursor_in_subpad},cip={handler.subpads[handler.cursor_in_subpad].cursor_pos}', 2)
+                elif ch == ord('+'):
+                    handler.adjust_subpad_height(1)
+                    handler.gfl.log('CURSES', f'Key + pressed. cp={handler.cursor_in_subpad}', 2)
+                elif ch == ord('-'):
+                    handler.adjust_subpad_height(-1)
+                    handler.gfl.log('CURSES', f'Key - pressed. cp={handler.cursor_in_subpad}', 2)
                 elif ch == ord('q'):
                     if not True in handler.tasks_running_status:
                         running = False

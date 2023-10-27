@@ -14,7 +14,7 @@ def main():
 
     gfl.log('MAIN', 'para-run (v%s) launch!' % VERSION)
 
-    runner.para_run(cmds, gfl)
+    runner.para_run(cmds, gfl, args)
 
     gfl.log('MAIN', 'para-run shutdown successfully.')
 

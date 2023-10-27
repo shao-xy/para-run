@@ -40,7 +40,7 @@ class SubPad:
                 #title = '[PROC %d] %s' % (self.index+1, self.wh.cmds[self.index])
                 title = '[PROC %d] (%s) %s' % (self.index+1,
                         (self.wh.tasks_running_status[self.index] \
-                            and 'RUNNING' or 'STOPPED'),
+                            and 'RUNNING' or f'STOPPED:{self.wh.tasks_retcode[self.index]}'),
                         self.wh.cmds[self.index])
                 self.wh.gfl.log(self.log_tag, 'refresh pad_title_pos ' + str(pad_title_pos) + f' {self.wh.width} ' + title, 5)
                 title += ' ' * (self.wh.width - len(title))
@@ -139,6 +139,13 @@ class SubPad:
     def get_cursor_posy(self):
         return self.shown_pos_offset + 1 + self.cursor_pos \
                 + self.wh.user_control_offset - self.visible_pos
+
+    def adjust_height(self, size):
+        new_height = max(self.shown_height + size, 1)
+        real_adjust_size = new_height - self.shown_height
+        self.shown_height = new_height
+        self._maybe_update_visible_pos()
+        return real_adjust_size
 
     def __repr__(self):
         y, x = self.pad.getyx()

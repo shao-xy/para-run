@@ -12,10 +12,12 @@ def run_single_cmd(cmd, window_handler, thrd_index):
     for line in iter(subp.stdout.readline, b""):
         window_handler.append_line(thrd_index, line)
 
-    window_handler.mark_finished(thrd_index)
+    returncode = subp.wait()
 
-def para_run(cmds, gfl):
-    window_handler = WindowHandler(cmds, gfl)
+    window_handler.mark_finished(thrd_index, returncode)
+
+def para_run(cmds, gfl, args):
+    window_handler = WindowHandler(cmds, gfl, args)
     
     """
     Do not use subthreads to run curses.wrapper:

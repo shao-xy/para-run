@@ -11,24 +11,27 @@ class SubPad:
         self.wh = wh
         self.index = index
         self.log_tag = 'SubPad(%d)' % self.index
+        # Allow a separation line between tasks
+        self.shown_pos_offset = index * (wh.subpads_shown_height + 2) + HEADER_LINES
         self.shown_height = wh.subpads_shown_height
         self.watching_at_end = True
         self.visible_pos = 0
-        # Allow a separation line between tasks
-        self.shown_pos_offset = index * (wh.subpads_shown_height + 2) + HEADER_LINES
+        self.cursor_pos = 0
         self.pad = curses.newpad(DEFAULT_SUBPADS_HEIGHT, wh.width)
         self.pad.scrollok(True)
         #self._swap_buffer(wh.output_buffer[index])
 
     def _swap_buffer(self, buffered_lines):
         self.pad.addstr(buffered_lines)
-        self._refresh(self.watching_at_end)
+        if self.watching_at_end:
+            y, x = self.pad.getyx()
+            self.cursor_pos = y
+        self._maybe_update_visible_pos()
+        self._refresh()
         #self.wh.stdscr.refresh()
 
-    def _refresh(self, force_watching_at_end=False):
+    def _refresh(self):
         assert(self.wh.mutex.locked())
-        if force_watching_at_end:
-            self.watching_at_end = True
 
         # pad subtitle
         pad_title_pos = self.shown_pos_offset + self.wh.user_control_offset
@@ -74,12 +77,12 @@ class SubPad:
 
         render_height = render_offset_end - render_offset_start + 1
 
-        y, x = self.pad.getyx()
-        if self.watching_at_end:
-            if render_offset_start == HEADER_LINES:
-                self.visible_pos = max(max(y, self.shown_height) - render_height, 0)
-            else:
-                self.visible_pos = max(y - self.shown_height, 0)
+        #y, x = self.pad.getyx()
+        #if self.watching_at_end:
+        #    if render_offset_start == HEADER_LINES:
+        #        self.visible_pos = max(max(y, self.shown_height) - render_height, 0)
+        #    else:
+        #        self.visible_pos = max(y - self.shown_height, 0)
             #self.visible_pos = max(y - render_height + 1, 0)
 
         #if not True in self.wh.tasks_running_status:
@@ -104,9 +107,38 @@ class SubPad:
         self.wh.gfl.log(self.log_tag, 'refresh ' + repr(self) + ' finish.', 5)
         self.wh.stdscr.refresh()
 
-    def refresh(self, force_watching_at_end=False):
-        self._refresh(force_watching_at_end)
-        self.wh.stdscr.refresh()
+    def refresh(self):
+        self.wh.mutex.acquire()
+        self._refresh()
+        self.wh.mutex.release()
+
+    def _maybe_update_visible_pos(self):
+        if self.cursor_pos < self.visible_pos:
+            self.visible_pos = max(self.cursor_pos, 0)
+            return True
+        elif self.cursor_pos >= self.visible_pos + self.shown_height:
+            self.visible_pos = self.cursor_pos - self.shown_height + 1
+            return True
+        return False
+
+    def move_cursor(self, direction):
+        self.cursor_pos += direction
+        y, x = self.pad.getyx()
+        self.watching_at_end = False
+        if self.cursor_pos < 0:
+            self.cursor_pos = 0
+        elif self.cursor_pos > y:
+            self.cursor_pos = y
+            self.watching_at_end = True
+
+        if self._maybe_update_visible_pos():
+            self.refresh()
+
+        self.wh.show_cursor()
+
+    def get_cursor_posy(self):
+        return self.shown_pos_offset + 1 + self.cursor_pos \
+                + self.wh.user_control_offset - self.visible_pos
 
     def __repr__(self):
         y, x = self.pad.getyx()

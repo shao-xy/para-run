@@ -18,6 +18,7 @@ class WindowHandler:
         self.mutex = threading.Lock()
         self.subpads_shown_height = DEFAULT_SUBPADS_SHOWN_HEIGHT
         self.user_control_offset = 0
+        self.cursor_in_subpad = 0
         self.flag_refresh = False
         self.has_update = False
         self.inited = False
@@ -31,6 +32,7 @@ class WindowHandler:
     # Must be called after curses.initscr()
     def init_all(self, stdscr):
         self.stdscr = stdscr
+        #self.stdscr.leaveok(True)
         self.color_available = curses.has_colors()
         if self.color_available:
             curses.init_pair(1, curses.COLOR_WHITE, curses.COLOR_BLUE)
@@ -58,6 +60,7 @@ class WindowHandler:
             if self.output_buffer[i]:
                 self.subpads[i]._swap_buffer(self.output_buffer[i])
                 self.output_buffer[i] = b''
+        self.show_cursor(True)
         self.has_update = False
 
     def mark_finished(self, task_id):
@@ -81,21 +84,73 @@ class WindowHandler:
         else:
             self.stdscr.addstr(0, 0, header)
 
+    def get_cursor_posy(self):
+        return self.subpads[self.cursor_in_subpad].get_cursor_posy()
+
+    def show_cursor(self, refresh_stdscr = False):
+        pos_y = self.get_cursor_posy()
+
+        if pos_y < HEADER_LINES:
+            pos_y = HEADER_LINES
+        elif pos_y >= self.height:
+            pos_y = self.height - 1
+        #curses.setsyx(pos_y, 0)
+        self.stdscr.move(pos_y, 0)
+        if refresh_stdscr:
+            self.stdscr.refresh()
+
+        self.gfl.log('WindowHandler', f'show cursor ({pos_y},0)')
+        
     def _refresh_all(self):
         if not self.inited:
-            self.mutex.release()
             return
         self.stdscr.clear()
         self._refresh_header()
         self.stdscr.refresh()
         for subpad in self.subpads:
-            subpad.refresh()
+            subpad._refresh()
+        self.show_cursor()
         self.stdscr.refresh()
 
     def refresh_all(self):
         self.mutex.acquire()
         self._refresh_all()
         self.mutex.release()
+
+    def maybe_move_cursor(self):
+        cursor_posy = self.get_cursor_posy()
+        while cursor_posy < HEADER_LINES:
+            if self.cursor_in_subpad < len(self.subpads) - 1:
+                self.cursor_in_subpad += 1
+                cursor_posy = self.get_cursor_posy()
+            else:
+                break
+
+        while cursor_posy >= self.height:
+            if self.cursor_in_subpad > 0:
+                self.cursor_in_subpad -= 1
+                cursor_posy = self.get_cursor_posy()
+            else:
+                break
+
+    def maybe_move_viewport(self):
+        pos_y = self.get_cursor_posy()
+
+        # We don't show cursor here:
+        if pos_y < HEADER_LINES:
+            self.user_control_offset += HEADER_LINES - pos_y
+            self.refresh_all()
+            self.gfl.log('WindowHandler', f'maybe_move_viewport uco set to {self.user_control_offset}', 5)
+        elif pos_y >= self.height:
+            self.user_control_offset -= pos_y - self.height + 1
+            self.refresh_all()
+            self.gfl.log('WindowHandler', f'maybe_move_viewport uco set to {self.user_control_offset}', 5)
+        else:
+            self.show_cursor()
+
+    def move_cursor_in_pad(self, direction):
+        self.subpads[self.cursor_in_subpad].move_cursor(direction)
+        self.maybe_move_viewport()
 
     def start_worker_threads(self, cmds, func_single_thread):
         tasks_acc = 1
@@ -147,14 +202,30 @@ class WindowHandler:
 
                 inferior = (render_height_logical_total > handler.height) \
                         and (1 - render_height_logical_total) or 0
-                if ch == curses.KEY_DOWN and handler.user_control_offset > inferior:
+                if ch == ord('e') and handler.user_control_offset > inferior:
                     handler.user_control_offset -= 1
-                    handler.gfl.log('CURSES', f'Key DOWN pressed. rhlt={render_height_logical_total} uco={handler.user_control_offset}', 2)
+                    handler.maybe_move_cursor()
+                    handler.gfl.log('CURSES', f'Key e pressed. rhlt={render_height_logical_total} uco={handler.user_control_offset}', 2)
                     handler.refresh_all()
-                elif ch == curses.KEY_UP and handler.user_control_offset < 0:
+                elif ch == ord('y') and handler.user_control_offset < 0:
                     handler.user_control_offset += 1
-                    handler.gfl.log('CURSES', f'Key UP pressed. rhlt={render_height_logical_total} uco={handler.user_control_offset}', 2)
+                    handler.maybe_move_cursor()
+                    handler.gfl.log('CURSES', f'Key y pressed. rhlt={render_height_logical_total} uco={handler.user_control_offset}', 2)
                     handler.refresh_all()
+                elif ch == curses.KEY_DOWN and handler.cursor_in_subpad < len(handler.subpads) - 1:
+                    handler.cursor_in_subpad += 1
+                    handler.maybe_move_viewport()
+                    handler.gfl.log('CURSES', f'Key DOWN pressed. cp={handler.cursor_in_subpad},cip={handler.subpads[handler.cursor_in_subpad].cursor_pos}', 2)
+                elif ch == curses.KEY_UP and handler.cursor_in_subpad > 0:
+                    handler.cursor_in_subpad -= 1
+                    handler.maybe_move_viewport()
+                    handler.gfl.log('CURSES', f'Key UP pressed. cp={handler.cursor_in_subpad},cip={handler.subpads[handler.cursor_in_subpad].cursor_pos}', 2)
+                elif ch == ord('j'):
+                    handler.move_cursor_in_pad(1)
+                    handler.gfl.log('CURSES', f'Key j pressed. cp={handler.cursor_in_subpad},cip={handler.subpads[handler.cursor_in_subpad].cursor_pos}', 2)
+                elif ch == ord('k'):
+                    handler.move_cursor_in_pad(-1)
+                    handler.gfl.log('CURSES', f'Key k pressed. cp={handler.cursor_in_subpad},cip={handler.subpads[handler.cursor_in_subpad].cursor_pos}', 2)
                 elif ch == ord('q'):
                     if not True in handler.tasks_running_status:
                         running = False

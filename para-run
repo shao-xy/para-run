@@ -4,18 +4,21 @@
 import sys
 
 from common.configs import *
-from common.logger import FileLogger
+from common.logger import GlobalFileLogger
 from common import argparser
-from common import runner
+
+from tui.WindowHandler import WindowHandler
+
+def para_run(cmds, gfl, args):
+    window_handler = WindowHandler(cmds, gfl, args)
+    WindowHandler.start_main(window_handler, cmds)
 
 def main():
     args, cmds = argparser.parse_cmds()
-    gfl = FileLogger(args.debug_level)
+    gfl = GlobalFileLogger(args.debug_level)
 
     gfl.log('MAIN', 'para-run (v%s) launch!' % VERSION)
-
-    runner.para_run(cmds, gfl, args)
-
+    para_run(cmds, gfl, args)
     gfl.log('MAIN', 'para-run shutdown successfully.')
 
     return 0

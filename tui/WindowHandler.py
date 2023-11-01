@@ -2,11 +2,13 @@
 
 from common.configs import *
 
+import os
 import threading
 import curses
-import traceback
+from datetime import datetime
 
 from tui.SubPad import SubPad
+from common.runner import Task
 
 class WindowHandler:
     def __init__(self, cmds, gfl, args):
@@ -15,9 +17,11 @@ class WindowHandler:
         self.tasks_total = len(cmds)
         self.tasks_running_status = [True] * self.tasks_total
         self.tasks_retcode = [0] * self.tasks_total
-        self.output_buffer = [b''] * self.tasks_total
+        self.output_buffer = [''] * self.tasks_total
         self.mutex = threading.Lock()
         self.subpads_shown_height = args.subwin_height
+        self.log_output = args.log_output
+        self.start_ts = datetime.now()
         self.user_control_offset = 0
         self.cursor_in_subpad = 0
         self.flag_refresh = False
@@ -28,7 +32,7 @@ class WindowHandler:
         self.height, self.width = self.stdscr.getmaxyx()
         #self.stdscr.erase()
         #self.stdscr.refresh()
-        self.gfl.log('WindowHandler', f'Screen size resized to {self.height} * {self.width}')
+        self.gfl.log('WindowHandler', f'Screen size resized to {self.height} * {self.width}', 1)
 
     # Must be called after curses.initscr()
     def init_all(self, stdscr):
@@ -49,7 +53,7 @@ class WindowHandler:
 
     def append_line(self, task_id, line):
         self.mutex.acquire()
-        self.gfl.log('WindowHandler', 'append_line %d %s' % (task_id, str(line)), 2)
+        self.gfl.log('WindowHandler', 'append_line %d %s' % (task_id, line), 2)
         self.output_buffer[task_id - 1] += line
         self.has_update = True
         self._update_buffers()
@@ -60,7 +64,7 @@ class WindowHandler:
         for i in range(self.tasks_total):
             if self.output_buffer[i]:
                 self.subpads[i]._swap_buffer(self.output_buffer[i])
-                self.output_buffer[i] = b''
+                self.output_buffer[i] = ''
         self.show_cursor(True)
         self.has_update = False
 
@@ -73,13 +77,35 @@ class WindowHandler:
             self._refresh_all()
         self.mutex.release()
 
+    def _gen_header(self, finished, total):
+        title = 'PARA-RUN V%s' % VERSION
+        finish_prompt = 'Finished: %d / %d' % (finished, total)
+        process_prompt = '%d%%' % (finished * 100 // total)
+
+        len_title = len(title)
+        len_finish_prompt = len(finish_prompt)
+        len_process_prompt = len(process_prompt)
+        width = self.width
+
+        header = ''
+        if width >= len_title + 2 + 2 * len_finish_prompt:
+            header += finish_prompt + ' ' * ((width-len_title)//2-len_finish_prompt) \
+                        + title
+            header += ' ' * (width - len(header) - len_process_prompt) + process_prompt
+        elif width >= len_title + 2 + 2 * len_process_prompt:
+            header += ' ' * ((width - len_title) // 2) + title
+            header += ' ' * (width - len(header) - len_process_prompt) + process_prompt
+        elif width >= len_title:
+            header += ' ' * ((width - len_title) // 2) + title
+            header += ' ' * (width - len(header))
+        return header
+
     def _refresh_header(self):
         finished = sum([ 1 for stat in self.tasks_running_status if not stat ])
         total = len(self.tasks_running_status)
-        header = 'PARA-RUN V%s   Finished: %d / %d' % (VERSION, finished, total)
+        header = self._gen_header(finished, total)
 
         if self.color_available:
-            header += ' ' * (self.width - len(header))
             highlighted_len = self.width * finished // total
             self.stdscr.addstr(0, 0, header[:highlighted_len], curses.color_pair(1))
             self.stdscr.addstr(header[highlighted_len:])
@@ -101,8 +127,8 @@ class WindowHandler:
         if refresh_stdscr:
             self.stdscr.refresh()
 
-        self.gfl.log('WindowHandler', f'show cursor ({pos_y},0)')
-        
+        self.gfl.log('WindowHandler', f'show cursor ({pos_y},0)', 5)
+
     def _refresh_all(self):
         if not self.inited:
             return
@@ -162,26 +188,39 @@ class WindowHandler:
         self._refresh_all()
         self.mutex.release()
 
-    def start_worker_threads(self, cmds, func_single_thread):
+    def start_worker_threads(self, cmds):
         tasks_acc = 1
         tasks_total = len(cmds)
         self.thrd_pool = []
+
         for cmd in cmds:
-            t = threading.Thread(target = func_single_thread, args = (cmd, self, tasks_acc))
+            t = Task(cmd, self, tasks_acc)
             t.start()
             self.thrd_pool.append(t)
             tasks_acc += 1
 
+        return True
+
     def join_worker_threads(self):
+        if not hasattr(self, 'thrd_pool'):
+            return
+
         for t in self.thrd_pool:
             t.join()
 
     @staticmethod
+    def curses_clean(stdscr):
+        # Clean up curses
+        curses.nocbreak()
+        stdscr.keypad(False)
+        curses.echo()
+        curses.endwin()
+
+    @staticmethod
     def main(stdscr, *args, **kwargs):
-        assert(len(args) == 3 and len(kwargs) == 0)
+        assert(len(args) == 2 and len(kwargs) == 0)
         handler = args[0]
         cmds = args[1]
-        func_single_thread = args[2]
 
         curses.initscr()
         curses.noecho()
@@ -190,9 +229,10 @@ class WindowHandler:
 
         try:
             handler.init_all(stdscr)
-            handler.start_worker_threads(cmds, func_single_thread)
-
             running = True
+            if not handler.start_worker_threads(cmds):
+                running = False
+
             while running:
                 ch = stdscr.getch()
                 handler.gfl.log('CURSES', f'ch={ch}', 5)
@@ -226,10 +266,16 @@ class WindowHandler:
                     handler.cursor_in_subpad += 1
                     handler.maybe_move_viewport()
                     handler.gfl.log('CURSES', f'Key DOWN pressed. cp={handler.cursor_in_subpad},cip={handler.subpads[handler.cursor_in_subpad].cursor_pos}', 2)
-                elif ch == curses.KEY_UP and handler.cursor_in_subpad > 0:
-                    handler.cursor_in_subpad -= 1
-                    handler.maybe_move_viewport()
-                    handler.gfl.log('CURSES', f'Key UP pressed. cp={handler.cursor_in_subpad},cip={handler.subpads[handler.cursor_in_subpad].cursor_pos}', 2)
+                elif ch == curses.KEY_UP:
+                    if handler.cursor_in_subpad > 0:
+                        handler.cursor_in_subpad -= 1
+                        handler.maybe_move_viewport()
+                        handler.gfl.log('CURSES', f'Key UP pressed. cp={handler.cursor_in_subpad},cip={handler.subpads[handler.cursor_in_subpad].cursor_pos}', 2)
+                    else:
+                        handler.user_control_offset = 0
+                        handler.maybe_move_cursor()
+                        handler.gfl.log('CURSES', f'Key UP pressed. cp={handler.cursor_in_subpad},cip={handler.subpads[handler.cursor_in_subpad].cursor_pos}', 2)
+                        handler.refresh_all()
                 elif ch == ord('j'):
                     handler.move_cursor_in_pad(1)
                     handler.gfl.log('CURSES', f'Key j pressed. cp={handler.cursor_in_subpad},cip={handler.subpads[handler.cursor_in_subpad].cursor_pos}', 2)
@@ -248,19 +294,16 @@ class WindowHandler:
         except KeyboardInterrupt:
             pass
 
-        # Clean up curses
-        curses.nocbreak()
-        stdscr.keypad(False)
-        curses.echo()
-        curses.endwin()
+        WindowHandler.curses_clean(stdscr)
 
     @staticmethod
-    def start_main(window_handler, cmds, func_single_thread):
+    def start_main(window_handler, cmds):
         ret = -1
         try:
-            ret = curses.wrapper(WindowHandler.main, window_handler, cmds, func_single_thread)
+            ret = curses.wrapper(WindowHandler.main, window_handler, cmds)
         except Exception as e:
-            window_handler.gfl.log('MAIN', ''.join(traceback.format_exception(None, e, e.__traceback__)))
+            window_handler.gfl.dump_error('MAIN', e)
+            WindowHandler.curses_clean(stdscr)
 
         window_handler.join_worker_threads()
 

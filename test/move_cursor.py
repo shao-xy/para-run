@@ -7,7 +7,7 @@ def main1(stdscr):
 	h, w = stdscr.getmaxyx()
 	direction = 1
 	pos = 0
-	
+
 	while True:
 		#curses.setsyx(pos, 0)
 		stdscr.move(pos, 0)

@@ -1,44 +1,43 @@
 # vim: expandtab smarttab ts=4
 
+import os
 import threading
 import subprocess
 
-from tui.WindowHandler import WindowHandler
+from common.logger import TaskFileLogger
+from common.configs import *
 
-def run_single_cmd(cmd, window_handler, thrd_index):
-    if not cmd:    return
-    subp = subprocess.Popen(cmd, shell = True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+class Task(threading.Thread):
+    def __init__(self, cmd, window_handler, thrd_index):
+        super().__init__()
+        self.cmd = cmd
+        self.wh = window_handler
+        self.index = thrd_index
+        self.log_tag = f'Task {self.index}'
 
-    for line in iter(subp.stdout.readline, b""):
-        window_handler.append_line(thrd_index, line)
+    def run(self):
+        if not self.cmd:    return
 
-    returncode = subp.wait()
+        self.wh.gfl.log(self.log_tag, 'Thread start. ' + repr(self), 0)
 
-    window_handler.mark_finished(thrd_index, returncode)
+        sfl = None
+        if self.wh.log_output:
+            sfl = TaskFileLogger(self.wh.start_ts, self.index, emergency_out=self.wh.gfl)
 
-def para_run(cmds, gfl, args):
-    window_handler = WindowHandler(cmds, gfl, args)
-    
-    """
-    Do not use subthreads to run curses.wrapper:
-      signal SIGWINCH cannot be immediately handled
-    These codes are moved to the WindowHandler class
-    """
-    #wht = threading.Thread(target=WindowHandler.start_main, args = (window_handler, ))
-    #wht.start()
+        subp = subprocess.Popen(self.cmd, shell = True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 
-    # tasks_acc = 1
-    # tasks_total = len(cmds)
-    # thrd_pool = []
-    # for cmd in cmds:
-    #     t = threading.Thread(target = run_single_cmd, args = (cmd, window_handler, tasks_acc))
-    #     t.start()
-    #     thrd_pool.append(t)
-    #     tasks_acc += 1
+        for line in iter(subp.stdout.readline, b""):
+            line = line.decode('utf-8')
+            self.wh.append_line(self.index, line)
+            if sfl:
+                sfl.write(line)
+                sfl.flush()
 
-    # for t in thrd_pool:
-    #     t.join()
-    # wht.join()
+        returncode = subp.wait()
 
-    WindowHandler.start_main(window_handler, cmds, run_single_cmd)
+        self.wh.mark_finished(self.index, returncode)
 
+        self.wh.gfl.log(self.log_tag, 'Thread end. ' + repr(self), 0)
+
+    def __repr__(self):
+        return f'[Task:idx={self.index},cmd="{self.cmd}"]'

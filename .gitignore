@@ -2,3 +2,6 @@
 *.sw[a-z]
 
 __pycache__/
+*.egg-info/
+build/
+dist/
